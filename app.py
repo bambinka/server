@@ -1,13 +1,27 @@
 from flask import Flask, request
-from flask_socketio import SocketIO, emit, join_room, leave_room, rooms
+from flask_socketio import SocketIO, emit, join_room, leave_room
 from flask_cors import CORS
 import random
 import string
 
 app = Flask(__name__)
 app.config['SECRET_KEY'] = 'durak_secret_key_2025'
+
+# CORS настройки
 CORS(app, resources={r"/*": {"origins": "*"}})
-socketio = SocketIO(app, cors_allowed_origins="*", async_mode='threading')
+
+# Socket.IO с правильными настройками
+socketio = SocketIO(
+    app,
+    cors_allowed_origins="*",
+    async_mode='threading',
+    logger=False,
+    engineio_logger=False,
+    ping_timeout=120,
+    ping_interval=25,
+    cors_credentials=False,
+    allow_upgrades=True
+)
 
 # Дані гри
 game_rooms = {}
@@ -45,13 +59,18 @@ def can_beat(attack_card, defense_card, trump_suit):
 def index():
     return {'status': 'Дурак сервер працює!', 'version': '1.0'}
 
+@app.route('/health')
+def health():
+    return {'status': 'ok', 'rooms': len(game_rooms)}
+
 @socketio.on('connect')
 def handle_connect():
-    print(f'Клієнт підключився: {request.sid}')
+    print(f'✅ Клієнт підключився: {request.sid}')
+    emit('connected', {'status': 'success', 'message': 'Підключено до сервера'})
 
 @socketio.on('disconnect')
 def handle_disconnect():
-    print(f'Клієнт відключився: {request.sid}')
+    print(f'❌ Клієнт відключився: {request.sid}')
     
     # Видалення гравця з кімнат
     for room_code, room_data in list(game_rooms.items()):
@@ -59,13 +78,14 @@ def handle_disconnect():
         for player in players:
             if player['sid'] == request.sid:
                 players.remove(player)
-                emit('player_left', {
+                socketio.emit('player_left', {
                     'player_name': player['name'],
                     'players': [{'name': p['name'], 'card_count': len(p.get('hand', []))} for p in players]
                 }, room=room_code)
                 
                 if len(players) == 0:
                     del game_rooms[room_code]
+                    print(f'🗑️ Кімната {room_code} видалена (пуста)')
                 break
 
 @socketio.on('create_room')
@@ -92,7 +112,7 @@ def handle_create_room(data):
     
     join_room(room_code)
     emit('room_created', {'room_code': room_code})
-    print(f'Кімната створена: {room_code}')
+    print(f'🎮 Кімната створена: {room_code} | Хост: {player_name}')
 
 @socketio.on('join_room')
 def handle_join_room(data):
@@ -128,12 +148,12 @@ def handle_join_room(data):
         'players': [{'name': p['name'], 'card_count': 0} for p in room['players']]
     })
     
-    emit('player_joined', {
+    socketio.emit('player_joined', {
         'player_name': player_name,
         'players': [{'name': p['name'], 'card_count': 0} for p in room['players']]
     }, room=room_code, skip_sid=request.sid)
     
-    print(f'{player_name} приєднався до {room_code}')
+    print(f'👤 {player_name} приєднався до {room_code}')
 
 @socketio.on('leave_room')
 def handle_leave_room(data):
@@ -152,14 +172,14 @@ def handle_leave_room(data):
         leave_room(room_code)
         
         if player_name:
-            emit('player_left', {
+            socketio.emit('player_left', {
                 'player_name': player_name,
                 'players': [{'name': p['name'], 'card_count': len(p.get('hand', []))} for p in room['players']]
             }, room=room_code)
         
         if len(room['players']) == 0:
             del game_rooms[room_code]
-            print(f'Кімната {room_code} видалена')
+            print(f'🗑️ Кімната {room_code} видалена')
 
 @socketio.on('start_game')
 def handle_start_game(data):
@@ -205,7 +225,7 @@ def handle_start_game(data):
             'players': [{'name': p['name'], 'card_count': len(p['hand'])} for p in room['players']]
         }, room=player['sid'])
     
-    print(f'Гра почалася в кімнаті {room_code}')
+    print(f'🎲 Гра почалася в кімнаті {room_code}')
 
 @socketio.on('play_card')
 def handle_play_card(data):
@@ -236,7 +256,7 @@ def handle_play_card(data):
                 current_player['hand'].remove(card)
                 room['table_cards'].append({'attack': card, 'defense': None})
         
-        emit('card_played', {
+        socketio.emit('card_played', {
             'player': current_player['name'],
             'action': 'throw'
         }, room=room_code)
@@ -250,7 +270,7 @@ def handle_play_card(data):
         
         room['table_cards'] = []
         
-        emit('chat_message', {
+        socketio.emit('chat_message', {
             'player': 'Система',
             'message': f'{current_player["name"]} взяв карти'
         }, room=room_code)
@@ -273,7 +293,7 @@ def handle_play_card(data):
             break
     
     if winner:
-        emit('game_over', {'winner': winner}, room=room_code)
+        socketio.emit('game_over', {'winner': winner}, room=room_code)
         room['game_started'] = False
         return
     
@@ -300,7 +320,7 @@ def handle_chat_message(data):
                 break
         
         if player_name:
-            emit('chat_message', {
+            socketio.emit('chat_message', {
                 'player': player_name,
                 'message': message
             }, room=room_code)
@@ -317,7 +337,7 @@ def handle_random_event(data):
     
     if event_type == 'trump_change':
         room['trump_suit'] = random.choice(SUITS)
-        emit('special_event', {
+        socketio.emit('special_event', {
             'event': 'trump_change',
             'message': f'Новий козир: {room["trump_suit"]}'
         }, room=room_code)
@@ -328,7 +348,7 @@ def handle_random_event(data):
             if room['deck']:
                 player['hand'].append(room['deck'].pop(0))
         
-        emit('special_event', {
+        socketio.emit('special_event', {
             'event': 'drunk_dealer',
             'message': 'П\'яний дилер роздав карти!'
         }, room=room_code)
@@ -338,7 +358,7 @@ def handle_random_event(data):
         for player in room['players']:
             random.shuffle(player['hand'])
         
-        emit('special_event', {
+        socketio.emit('special_event', {
             'event': 'matrix_error',
             'message': 'Карти перемішано!'
         }, room=room_code)
@@ -350,12 +370,13 @@ def handle_random_event(data):
             if random_player['hand']:
                 random_player['hand'].pop(random.randint(0, len(random_player['hand']) - 1))
         
-        emit('special_event', {
+        socketio.emit('special_event', {
             'event': 'light_flicker',
             'message': 'Хтось втратив карту!'
         }, room=room_code)
 
 if __name__ == '__main__':
-    port = 5000
+    import os
+    port = int(os.environ.get('PORT', 5000))
     print(f'🎴 Дурак сервер запущено на порті {port}')
-    socketio.run(app, host='0.0.0.0', port=port, debug=True)
+    socketio.run(app, host='0.0.0.0', port=port, debug=False, allow_unsafe_werkzeug=True)
